@@ -3,6 +3,7 @@ package blacklist
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 )
 
 type Handler struct {
@@ -14,18 +15,25 @@ func NewHandler(bl *Blacklist) *Handler {
 }
 
 type Request struct {
-	Entry string `json:"entry"`
+	Entry    string `json:"entry"`
+	BanType  string `json:"ban_type,omitempty"`
+	Duration string `json:"duration,omitempty"`
 }
 
 type Response struct {
-	Code    int      `json:"code"`
-	Message string   `json:"message"`
-	Data    any      `json:"data,omitempty"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
 }
 
 type ListData struct {
-	IPs   []string `json:"ips"`
-	CIDRs []string `json:"cidrs"`
+	IPs   []BanEntry `json:"ips"`
+	CIDRs []BanEntry `json:"cidrs"`
+}
+
+type CheckData struct {
+	Blacklisted bool      `json:"blacklisted"`
+	BanEntry    *BanEntry `json:"ban_entry,omitempty"`
 }
 
 func (h *Handler) Add(w http.ResponseWriter, r *http.Request) {
@@ -45,7 +53,32 @@ func (h *Handler) Add(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.bl.Add(req.Entry); err != nil {
+	cfg := DefaultBanConfig()
+	switch req.BanType {
+	case "temporary":
+		cfg.BanType = BanTemporary
+		if req.Duration == "" {
+			writeJSON(w, http.StatusBadRequest, Response{Code: 400, Message: "duration is required for temporary ban"})
+			return
+		}
+		d, err := time.ParseDuration(req.Duration)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, Response{Code: 400, Message: "invalid duration format, use Go duration string like '24h', '30m'"})
+			return
+		}
+		if d <= 0 {
+			writeJSON(w, http.StatusBadRequest, Response{Code: 400, Message: "duration must be positive"})
+			return
+		}
+		cfg.Duration = d
+	case "", "permanent":
+		cfg.BanType = BanPermanent
+	default:
+		writeJSON(w, http.StatusBadRequest, Response{Code: 400, Message: "invalid ban_type, must be 'temporary' or 'permanent'"})
+		return
+	}
+
+	if err := h.bl.Add(req.Entry, cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, Response{Code: 400, Message: err.Error()})
 		return
 	}
@@ -90,7 +123,7 @@ func (h *Handler) Check(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	found, err := h.bl.Contains(ip)
+	found, entry, err := h.bl.Contains(ip)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, Response{Code: 400, Message: err.Error()})
 		return
@@ -99,7 +132,10 @@ func (h *Handler) Check(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, Response{
 		Code:    0,
 		Message: "ok",
-		Data:    map[string]bool{"blacklisted": found},
+		Data: CheckData{
+			Blacklisted: found,
+			BanEntry:    entry,
+		},
 	})
 }
 
